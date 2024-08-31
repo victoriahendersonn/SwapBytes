@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.38.1", features = ["full"] }
+# chat application dependencies
+# runtime for async applications
+tokio = { version = "1.40.0", features = ["full"] }
+# make async fn in traits work with dyn traits
 async-trait = "0.1.81"
+# futures and streams
 futures = "0.3.30"
+# allows easy logging style functionality with asynchronous programs
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
 clap = { version = "4.5.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 ratatui = { version = "0.28.1", features = ["widget-calendar"] }
@@ -22,6 +30,8 @@ rand_chacha = "0.3.1"
 indoc = "2.0.5"
 ratatui-widgets = "0.1.10"
 
+
+# libp2p
 [dependencies.libp2p]
-version = "0.53.2"
-features = ["tokio", "gossipsub", "noise", "macros", "tcp", "quic", "yamux", "rendezvous", "ping", "identify", "cbor", "request-response"]
+version = "0.54.1"
+features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "quic", "yamux", "rendezvous", "ping", "identify", "cbor", "request-response", "kad"]
