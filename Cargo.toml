@@ -29,7 +29,8 @@ rand = "0.8.5"
 rand_chacha = "0.3.1"
 indoc = "2.0.5"
 ratatui-widgets = "0.1.10"
-
+regex = "1.10.6"
+serde_cbor = "0.11"
 
 # libp2p
 [dependencies.libp2p]

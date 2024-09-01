@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let listen_port = opt.port.unwrap_or("0".to_string());
     let multiaddr = format!("/ip4/0.0.0.0/tcp/{listen_port}");
-    let _ = swarm.listen_on(multiaddr.parse()?)?;
+    swarm.listen_on(multiaddr.parse()?)?;
 
     // if this is a file request peer, then dial the peer that serves the files
     if let Some(peer) = opt.peer {

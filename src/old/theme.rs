@@ -48,26 +48,26 @@ pub const THEME: Theme = Theme {
     },
 };
 
-const DARK_BLUE: Color = Color::Rgb(16, 24, 48);
-const LIGHT_BLUE: Color = Color::Rgb(64, 96, 192);
-const LIGHT_YELLOW: Color = Color::Rgb(192, 192, 96);
-const LIGHT_GREEN: Color = Color::Rgb(64, 192, 96);
-const LIGHT_RED: Color = Color::Rgb(192, 96, 96);
-const RED: Color = Color::Rgb(215, 0, 0);
+//const DARK_BLUE: Color = Color::Rgb(16, 24, 48);
+//const LIGHT_BLUE: Color = Color::Rgb(64, 96, 192);
+//const LIGHT_YELLOW: Color = Color::Rgb(192, 192, 96);
+//const LIGHT_GREEN: Color = Color::Rgb(64, 192, 96);
+//const LIGHT_RED: Color = Color::Rgb(192, 96, 96);
+//const RED: Color = Color::Rgb(215, 0, 0);
 const BLACK: Color = Color::Rgb(8, 8, 8); // not really black, often #080808
 const DARK_GRAY: Color = Color::Rgb(68, 68, 68);
-const MID_GRAY: Color = Color::Rgb(128, 128, 128);
-const LIGHT_GRAY: Color = Color::Rgb(188, 188, 188);
-const WHITE: Color = Color::Rgb(238, 238, 238); // not really white, often #eeeeee
+//const MID_GRAY: Color = Color::Rgb(128, 128, 128);
+//const LIGHT_GRAY: Color = Color::Rgb(188, 188, 188);
+//const WHITE: Color = Color::Rgb(238, 238, 238); // not really white, often #eeeeee
 
 // Alien Isolation theme
 const BACKGROUND_DARK_GREEN: Color = Color::Rgb(2, 36, 2); // hex #022402
 const SELECTED_WHITE: Color = Color::Rgb(212, 223, 207); // hex #D4DFCF
 const BORDER_GREEN: Color = Color::Rgb(0, 190, 110); // hex #00BE6E
-const BUTTON_GREEN: Color = Color::Rgb(0, 89, 58); // hex #00593A
+//const BUTTON_GREEN: Color = Color::Rgb(0, 89, 58); // hex #00593A
 
 const TITLE_TEXT_DARK_GREEN: Color = Color::Rgb(1, 46, 9); // hex #012E09
 const HEADING_TEXT_WHITE: Color = Color::Rgb(212, 223, 207); // hex #D4DFCF
-const HEADING_TEXT_GREEN: Color = Color::Rgb(0, 164, 93); // hex #00A45D
+//const HEADING_TEXT_GREEN: Color = Color::Rgb(0, 164, 93); // hex #00A45D
 const SELECTED_TEXT_DARK_GREEN: Color = Color::Rgb(43, 68, 41); // hex #2B4429
-const BUTTON_TEXT_LIGHT_GREEN: Color = Color::Rgb(0, 190, 255); // hex #00BEFF
+//const BUTTON_TEXT_LIGHT_GREEN: Color = Color::Rgb(0, 190, 255); // hex #00BEFF
