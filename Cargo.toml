@@ -31,6 +31,7 @@ indoc = "2.0.5"
 ratatui-widgets = "0.1.10"
 regex = "1.10.6"
 serde_cbor = "0.11"
+lazy_static = "1.4"
 
 # libp2p
 [dependencies.libp2p]

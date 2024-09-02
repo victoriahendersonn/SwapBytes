@@ -1,10 +1,26 @@
-use std::{collections::HashMap, error::Error, io::{ Read, Write }, sync::Arc, time::Duration};
-use color_eyre::owo_colors::colors::xterm::UserBlack;
+use clap::Parser;
 use futures::StreamExt;
-use libp2p::{ gossipsub, identity, kad::{self, store::MemoryStore, Mode, QueryId}, mdns, noise, request_response::{self, ProtocolSupport}, swarm::{ NetworkBehaviour, SwarmEvent }, tcp, yamux, PeerId, StreamProtocol };
+use libp2p::kad::store::MemoryStore;
+use libp2p::kad::QueryId;
+use libp2p::request_response::ProtocolSupport;
+use libp2p::{gossipsub, kad, mdns, noise, request_response, Multiaddr, StreamProtocol};
+use libp2p::{
+    swarm::{NetworkBehaviour, SwarmEvent},
+    tcp, yamux, PeerId,
+};
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use tokio::{ io::{ self, AsyncBufReadExt }, select };
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::error::Error;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use tokio::{
+    io::{self, AsyncBufReadExt},
+    select, spawn,
+};
 
+mod network;
 
 // a macro that is defined by libp2p called network behaviour
 #[derive(NetworkBehaviour)]
@@ -17,6 +33,65 @@ struct ChatBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
 }
 
+#[derive(Parser, Debug)]
+#[clap(name = "libp2p file sharing example")]
+struct Opt {
+    #[clap(long)]
+    peer: Option<Multiaddr>,
+
+    #[clap(long)]
+    listen_address: Option<Multiaddr>,
+
+    #[clap(subcommand)]
+    argument: Option<CliArgument>,
+}
+
+#[derive(Debug, Parser)]
+enum CliArgument {
+    Provide {
+        #[clap(long)]
+        path: PathBuf,
+        #[clap(long)]
+        name: String,
+    },
+    Get {
+        #[clap(long)]
+        name: String,
+    },
+}
+
+
+pub enum State {
+    GlobalChat,
+    DirectMessage,
+    Chat
+}
+
+// Implement the Default trait for State
+impl Default for State {
+    fn default() -> Self {
+        State::GlobalChat // Set the default variant to GlobalChat
+    }
+}
+
+#[derive(Default)]
+pub struct GlobalState {
+    pub nickname: String,
+    pub nicknames: HashMap<PeerId, String>,
+    pub state: State,
+    pub queries: HashMap<QueryId, PeerId>
+}
+
+impl GlobalState {
+    fn new() -> GlobalState {
+        GlobalState::default()
+    }
+}
+
+// allows the global state mutable and accessible safely across threads
+lazy_static! {
+    pub static ref STATE: Arc<Mutex<GlobalState>> = Arc::new(Mutex::new(GlobalState::new()));
+}
 
 /**
  * Part of the file exchange protocol for the application,
@@ -24,6 +99,7 @@ struct ChatBehaviour {
  */
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRequest(pub String);
+
 
 /**
  * Part of the file exchange protocol for the application,
@@ -35,9 +111,6 @@ pub struct FileResponse(pub Vec<u8>);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // let keypair = identity::Keypair::generate_ed25519();
-
-    // importing libp2p -> creating a SwarmBuilder with a new identity -> creates a random key pair!
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_tcp(
@@ -71,18 +144,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
-        // this builds up a swarm. using gossip sub -> a chat room where people can subscribes to topics and if a msg
+		// this builds up a swarm. using gossip sub -> a chat room where people can subscribes to topics and if a msg
         // gets sent then all subscribers will receive the msg :) (propagates)
+
+	let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
     
-    // telling the swarm that the distributed hash table is acting as a server for requests that other 
-    // nodes will be asking for keys about?
-    swarm.behaviour_mut().kademlia.set_mode(Some(Mode::Server));
+    println!("Please enter a nickname:");
+    let new_nickname = stdin.next_line().await.unwrap().unwrap();
 
+    let mut state = STATE.lock().unwrap();
+    state.nickname = new_nickname.clone();
 
-    // creating a topic 
-    let topic = gossipsub::IdentTopic::new("global-chat");
-    // subscribing to the topic
-    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+    println!(
+        "Welcome to SwapBytes, {}! Please enter chat messages one line at a time.",
+        state.nickname
+    );
+
+    let peer_id = swarm.local_peer_id().clone();
+    state.nicknames.insert(peer_id, new_nickname.clone());
+
+	// gossipsub 
+	let topic = gossipsub::IdentTopic::new("global-chat");
+	swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+	
+    // kademlia
+    swarm
+        .behaviour_mut()
+        .kademlia
+        .set_mode(Some(kad::Mode::Server));
 
     // will listen on local host over two different protocols (UDP and TCP)
     // will randomly select a port for TCP 
@@ -91,92 +180,96 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
     // ^^ what ports do we want to listen on?
 
-    // adding this for standard user input!
-    // telling the standard input that it has to be wrapped around the tokio one
-    // the buffer reader will read that line in but one line at a time. 
-    let mut stdin = io::BufReader::new(io::stdin()).lines();
-    println!("Please enter a nickname:");
-    let nickname: String = stdin.next_line().await.unwrap().unwrap().to_string();
-    let mut queries: HashMap<QueryId, (PeerId, String)> = HashMap::new();
+    // // swarm
+    // let (mut client, mut _event_receiver, event_loop) = network::swarm().await?;
 
-    println!("Enter chat messages one line at a time:");
+    // let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
 
-    // messages will be coming in, as they are coming in we need to handle them as they happen.
-    // tokio has 'future's which will help with this.
-    // select the next future that has been completed.
+    // start event loop
+    //spawn(event_loop.run());
+
     loop {
         select! {
-            // is there a next line? if so go through that branch, if not... don't.
             Ok(Some(line)) = stdin.next_line() => {
-                // take the return value, if it matches error type, then push it into the error variable
-                // and print the line saying there was an error.
-                if let Err (err) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), line.as_bytes()) {
-                    println!("Error publishing: {:?}", err);
+                if let Err(e) = swarm
+                    .behaviour_mut().gossipsub
+                    .publish(topic.clone(), line.as_bytes()) {
+                    println!("Publish error: {e:?}");
                 }
             }
-
-            // match event to the event that actually happened.
             event = swarm.select_next_some() => match event {
-                // is someone listening to me? 
-
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    if address.to_string().contains("/ip4/127.0.0.1/udp") {
-                        let peer_id = swarm.local_peer_id().clone();
-    
-                        swarm.behaviour_mut().kademlia.add_address(&peer_id, address);
-
-                        // Serialize nickname.
-                        let nickname_bytes = serde_cbor::to_vec(&nickname).unwrap();
-                        
-                        let key = &peer_id.to_string();
-
-                        let record = kad::Record{
-                            key: kad::RecordKey::new(&key),
-                            value: nickname_bytes,
-                            publisher: None,
-                            expires: None,
-                        };
-
-                        match swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One) {
-                            Ok(_) => println!("Successfully put record {:?}", nickname),
-                            Err(err) => {
-                                println!("Failed to put record {err:?}");
-                            }
-                        }
-                    }
-                    // println!("Your node is listening on {address}");
-                }
-                   
                 SwarmEvent::Behaviour(ChatBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, multiaddr) in list {
-                        // println!("mdns discovered peer: {peer_id}, listening on {multiaddr}");
-                        // peers have been discovered! time to add them.
+                        println!("mDNS discovered a new peer: {peer_id}");
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                         swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
+                        
+                        //state.nicknames.insert("test".to_string(), peer_id.clone());
+
+                        // for (nickname, peer_id) in &state.nicknames {
+                        //     println!("{}", nickname);
+                        // }
+
+                        // fetch the nickname from kademlia
+                        let key_string = peer_id.to_string();
+                        let key = kad::RecordKey::new(&key_string);
+                        let query_id = swarm.behaviour_mut().kademlia.get_record(key);
+                        state.queries.insert(query_id, peer_id);
                     }
                 },
-
                 SwarmEvent::Behaviour(ChatBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-                    // removing an expired peer!
-                    for (peer_id, multiaddr) in list {
+                    for (peer_id, _multiaddr) in list {
+                        println!("mDNS discover peer has expired: {peer_id}");
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                        swarm.behaviour_mut().kademlia.remove_address(&peer_id, &multiaddr);
                     }
                 },
-
                 SwarmEvent::Behaviour(ChatBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
-                    message_id: _id, 
+                    message_id: _id,
                     message,
-                })) =>
-                    {
-                        if let Ok(message) = String::from_utf8(message.data.clone()) {
-                            let query_id = swarm.behaviour_mut().kademlia.get_record(kad::RecordKey::new(&peer_id.to_string()));
-                            queries.insert(query_id, (peer_id.clone(), message));
+                })) => {
+                    if let Some(name) = state.nicknames.get(&peer_id) {
+                        // If the peer_id exists in the nicknames map, use the associated name
+                        println!(
+                            "{}: {}",
+                            name,
+                            String::from_utf8_lossy(&message.data),
+                        );
+                    } else {
+                        // If the peer_id does not exist, use a placeholder name
+                        println!(
+                            "{}: {}",
+                            "<unknown>",
+                            String::from_utf8_lossy(&message.data),
+                        );
                     }
-                }
-                ,
+                },
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Local node is listening on {address}");
 
+                    if address.to_string().contains("/ip4/127.0.0.1/udp") {
+
+						let peer_id = swarm.local_peer_id().clone();
+						swarm.behaviour_mut().kademlia.add_address(&peer_id, address);
+
+						let nickname_bytes = serde_cbor::to_vec(&state.nickname).unwrap();
+						let key: String = peer_id.to_string();
+					
+						let record = kad::Record {
+							key: kad::RecordKey::new(&key),
+							value: nickname_bytes,
+							publisher: None,
+							expires: None,
+						};
+
+						swarm.behaviour_mut().kademlia
+							.put_record(record, kad::Quorum::One)
+							.expect("");
+					}
+                }
+                
+
+                // KADMELIIAA STUFF
                 SwarmEvent::Behaviour(ChatBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
                     id, 
                     result, 
@@ -190,15 +283,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 ..
                             })
                         )) => {
+                            match serde_cbor::from_slice::<String>(&value) {
+                                Ok(nickname) => {
+                                    println!("Got {:?} {:?}", std::str::from_utf8(key.as_ref()).unwrap(), value);
 
-                            if let Some((peer_id, message)) = queries.remove(&id) {
-                                match serde_cbor::from_slice::<String>(&value) {
-                                    Ok(nickname) => {
-                                        println!("{}: {}", nickname, message);
-                                    }
-                                    Err(_) => {
-                                        println!("Failed to decode nickname for peer {}, but received: {}", peer_id, message);
-                                    }
+                                    if state.queries.contains_key(&id) {
+                                        let peer_id = state.queries.remove(&id).expect("Message was not in queue");
+                                        state.nicknames.insert(peer_id.clone(), nickname);
+                                    } 
+                                }
+                                Err(e) => {
+                                    println!("Failed to decode: {}", e);
                                 }
                             }
                         }
@@ -206,7 +301,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         kad::QueryResult::GetRecord(Ok(_)) => {}
 
                         kad::QueryResult::GetRecord(Err(err)) => {
-                            println!("Failed to get record {err:?}");
+                            println!("Failed to get record {:?}, error: {:?}", id, err);
                         }
                         
                         kad::QueryResult::PutRecord(Ok(_)) => {
@@ -214,15 +309,118 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
 
                         kad::QueryResult::PutRecord(Err(err)) => {
-                            println!("Failed to put record {err:?}");
+                            println!("Failed to put record {:?}, error: {:?}", id, err);
                         }
                         
                         _ => {}
                     }
                 }
-
-                _ => {} // if the event doesn't match anything, just do nothing.
+                _ => {}
             }
         }
     }
+}
+
+
+
+/**
+ *
+ */
+async fn _handle_command(input: &str) {
+    let user_input: Vec<&str> = input.split_whitespace().collect();
+    match user_input[0] {
+        "/dm" => {
+            // /dm <nickname> <message>
+        }
+        "/send-message" => {
+            // /send-message <message>
+        }
+        "/list_files" => {
+            // /list_files
+        }
+        "/list_peers" => {
+            // /list_peers
+        }
+        "/set_nickname" => {
+            // /set_nickname <nickname>
+        }
+        "/post_offer" => {
+            // /post_offer <file_name>
+        }
+        "/request_file" => {
+            // /request_file <file_name>
+        }
+        "/accept-file" => {
+            // /accept-file <file_name>
+        }
+        "/cancel-file" => {
+            // /cancel-file <file_name>
+        }
+        "/connect" => {
+            // /connect <peer_address>
+        }
+        "/exit" => {
+            // /exit
+        }
+
+        _ => {
+            println!("Unknown command");
+        }
+    }
+
+    // match parts[0] {
+    //     "/create" => {
+    //         if parts.len() < 2 {
+    //             println!("Usage: /create <room_name>");
+    //         } else {
+    //             let room_name = parts[1].to_string();
+    //             client.create_room(room_name).await;
+    //             println!("Room created");
+    //         }
+    //     }
+    //     // "/join" => {
+    //     //     if parts.len() < 2 {
+    //     //         println!("Usage: /join <room_name>");
+    //     //     } else {
+    //     //         let room_name = parts[1].to_string();
+    //     //         client.join_room(room_name);
+    //     //         println!("Joined room");
+    //     //     }
+    //     // }
+    //     // "/request" => {
+    //     //     if parts.len() < 3 {
+    //     //         println!("Usage: /request <file_name> <peer_id>");
+    //     //     } else {
+    //     //         let file_name = parts[1].to_string();
+    //     //         let peer_id = parts[2].to_string();
+    //     //         client.request_file(peer_id, file_name);
+    //     //         println!("File request sent");
+    //     //     }
+    //     // }
+    //     // "/dm" => {
+    //     //     if parts.len() < 3 {
+    //     //         println!("Usage: /dm <peer_id> <message>");
+    //     //     } else {
+    //     //         let peer_id = parts[1].to_string();
+    //     //         let message = parts[2..].join(" ");
+    //     //         client.direct_message(, );
+    //     //         println!("Direct message sent");
+    //     //     }
+    //     // }
+    //     "/rooms" => {
+    //         println!("Current rooms:");
+    //         client.get_rooms().await;
+    //     }
+    //     // "/nickname" =>{
+    //     //     let local_peer_id_record = kad::RecordKey::new(&self_peer_id.to_string());
+    //     //     let record = kad::Record {
+    //     //         key: local_peer_id_record,
+    //     //         value: args[1].as_bytes().to_vec(),
+    //     //         publisher: None,
+    //     //         expires: None,
+    //     //     };
+    //     //     kademlia
+    //     //         .put_record(record, kad::Quorum::One)
+    //     //         .expect("Failed to store record locally.");
+    //     // }
 }
