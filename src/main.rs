@@ -3,7 +3,7 @@ use futures::StreamExt;
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::QueryId;
 use libp2p::request_response::ProtocolSupport;
-use libp2p::{gossipsub, kad, mdns, noise, request_response, Multiaddr, StreamProtocol};
+use libp2p::{gossipsub, kad, mdns, noise, request_response, Multiaddr, StreamProtocol, Swarm};
 use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId,
@@ -24,7 +24,7 @@ mod network;
 
 // a macro that is defined by libp2p called network behaviour
 #[derive(NetworkBehaviour)]
-struct ChatBehaviour {
+pub struct ChatBehaviour {
     // what is chat behaviour event then?
     // chat behaviour event gets added automatically (the compiler makes it!)
     pub mdns: mdns::tokio::Behaviour,
@@ -79,7 +79,9 @@ pub struct GlobalState {
     pub nickname: String,
     pub nicknames: HashMap<PeerId, String>,
     pub state: State,
-    pub queries: HashMap<QueryId, PeerId>
+    pub queries: HashMap<QueryId, PeerId>,
+    pub current_room: String,
+    pub rooms: Vec<String>,
 }
 
 impl GlobalState {
@@ -108,6 +110,24 @@ pub struct FileRequest(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileResponse(pub Vec<u8>);
 
+
+/**
+ * 
+ */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DirectMessageRequest {
+    pub nickname: String,
+    pub message: String,
+
+}
+
+/**
+ * 
+ */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DirectMessageResponse {
+    pub message: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -146,27 +166,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build();
 		// this builds up a swarm. using gossip sub -> a chat room where people can subscribes to topics and if a msg
         // gets sent then all subscribers will receive the msg :) (propagates)
-
-	let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
-    
-    println!("Please enter a nickname:");
-    let new_nickname = stdin.next_line().await.unwrap().unwrap();
-
-    let mut state = STATE.lock().unwrap();
-    state.nickname = new_nickname.clone();
-
-    println!(
-        "Welcome to SwapBytes, {}! Please enter chat messages one line at a time.",
-        state.nickname
-    );
-
-    let peer_id = swarm.local_peer_id().clone();
-    state.nicknames.insert(peer_id, new_nickname.clone());
-
-	// gossipsub 
-	let topic = gossipsub::IdentTopic::new("global-chat");
-	swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-	
+    	
     // kademlia
     swarm
         .behaviour_mut()
@@ -188,70 +188,90 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // start event loop
     //spawn(event_loop.run());
 
+    println!("Please enter a nickname:");
+    let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
+    
+    {
+        let new_nickname = stdin.next_line().await.unwrap().unwrap();
+        
+        let mut state = STATE.lock().unwrap();
+        state.nickname = new_nickname.clone();
+
+        println!(
+            "Welcome to SwapBytes, {}! Please enter chat messages one line at a time.",
+            state.nickname
+        );
+
+        let peer_id = swarm.local_peer_id().clone();
+        state.nicknames.insert(peer_id, new_nickname.clone());
+
+        // gossipsub 
+        let topic = gossipsub::IdentTopic::new("global-chat");
+        println!("Welcome to the global chat room! Here your messages will be propogated to all peers in the network.");
+        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+        state.current_room = "global-chat".to_string();
+        state.rooms.push("global-chat".to_string());
+    }
+
     loop {
         select! {
             Ok(Some(line)) = stdin.next_line() => {
-                if let Err(e) = swarm
-                    .behaviour_mut().gossipsub
-                    .publish(topic.clone(), line.as_bytes()) {
-                    println!("Publish error: {e:?}");
+                let mut command = Command::Unknown;
+                if line.starts_with("/") {
+                    command = create_command(&line).await;
+                } else {
+                    let mut state = STATE.lock().unwrap();
+                    // if not a command, then it's a message to the chat that they're in...
+                    // get the nickname from the state
+                    let nickname = state.nickname.clone();
+
+                    // prepend the nickname to the message
+                    let message = format!("{}: {}", nickname, line);
+
+                    command = Command::Message {
+                        room: state.current_room.clone(),
+                        message: message.clone(),
+                    };
                 }
+                handle_command(&mut swarm, command);
             }
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(ChatBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, multiaddr) in list {
-                        println!("mDNS discovered a new peer: {peer_id}");
+                        println!("Discovered peer: {} at {}", peer_id, multiaddr);
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                         swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
-                        
-                        //state.nicknames.insert("test".to_string(), peer_id.clone());
 
-                        // for (nickname, peer_id) in &state.nicknames {
-                        //     println!("{}", nickname);
-                        // }
-
-                        // fetch the nickname from kademlia
+                        // fetching the nickname from kademlia
                         let key_string = peer_id.to_string();
                         let key = kad::RecordKey::new(&key_string);
                         let query_id = swarm.behaviour_mut().kademlia.get_record(key);
+                        let mut state = STATE.lock().unwrap();
                         state.queries.insert(query_id, peer_id);
                     }
                 },
                 SwarmEvent::Behaviour(ChatBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discover peer has expired: {peer_id}");
+                    for (peer_id, multiaddr) in list {
+                        //println!("mDNS discover peer has expired: {peer_id}");
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                        swarm.behaviour_mut().kademlia.remove_address(&peer_id, &multiaddr);
                     }
                 },
                 SwarmEvent::Behaviour(ChatBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                    propagation_source: peer_id,
+                    propagation_source: _peer_id,
                     message_id: _id,
                     message,
                 })) => {
-                    if let Some(name) = state.nicknames.get(&peer_id) {
-                        // If the peer_id exists in the nicknames map, use the associated name
-                        println!(
-                            "{}: {}",
-                            name,
-                            String::from_utf8_lossy(&message.data),
-                        );
-                    } else {
-                        // If the peer_id does not exist, use a placeholder name
-                        println!(
-                            "{}: {}",
-                            "<unknown>",
-                            String::from_utf8_lossy(&message.data),
-                        );
-                    }
+                    println!("{}", String::from_utf8_lossy(&message.data));
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
-
+                    //println!("Local node is listening on {address}");
                     if address.to_string().contains("/ip4/127.0.0.1/udp") {
 
 						let peer_id = swarm.local_peer_id().clone();
 						swarm.behaviour_mut().kademlia.add_address(&peer_id, address);
 
+                        let mut state = STATE.lock().unwrap();
 						let nickname_bytes = serde_cbor::to_vec(&state.nickname).unwrap();
 						let key: String = peer_id.to_string();
 					
@@ -285,15 +305,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         )) => {
                             match serde_cbor::from_slice::<String>(&value) {
                                 Ok(nickname) => {
-                                    println!("Got {:?} {:?}", std::str::from_utf8(key.as_ref()).unwrap(), value);
-
+                                    let mut state = STATE.lock().unwrap();
                                     if state.queries.contains_key(&id) {
                                         let peer_id = state.queries.remove(&id).expect("Message was not in queue");
-                                        state.nicknames.insert(peer_id.clone(), nickname);
+                                        state.nicknames.insert(peer_id.clone(), nickname.clone());
+                                        println!("Added peer {} with nickname {}", peer_id, nickname); // Add this line
                                     } 
                                 }
                                 Err(e) => {
-                                    println!("Failed to decode: {}", e);
+                                    println!("Failed to decode nickname: {}", e); // Optional: Add this line to check decoding errors
                                 }
                             }
                         }
@@ -309,7 +329,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
 
                         kad::QueryResult::PutRecord(Err(err)) => {
-                            println!("Failed to put record {:?}, error: {:?}", id, err);
+                            // ("Failed to put record {:?}, error: {:?}", id, err);
                         }
                         
                         _ => {}
@@ -322,49 +342,88 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 
+/**
+ * 
+ */
+pub enum Command {
+    DirectMessage {
+        peer_nickname: String,
+        message: String,
+    },
+    Message {
+        room: String,
+        message: String,
+    },
+    ListFiles,
+    ListPeers,
+    SetNickname {
+        new_nickname: String,
+    },
+    PostOffer,
+    RequestFile,
+    AcceptFile,
+    CancelFile,
+    Connect,
+    Exit,
+    Help,
+    Unknown,
+    Error
+}
 
 /**
  *
  */
-async fn _handle_command(input: &str) {
+async fn create_command(input: &str) -> Command {
     let user_input: Vec<&str> = input.split_whitespace().collect();
     match user_input[0] {
         "/dm" => {
-            // /dm <nickname> <message>
+            if user_input.len() < 3 {
+                println!("Usage: /dm <peer_nickname> <message>");
+                Command::Error
+            } else if user_input.len() > 3 {
+                println!("Usage: /dm <peer_nickname> <message>");
+                Command::Error
+            } else {
+                Command::DirectMessage {
+                    peer_nickname: user_input[1].to_string(),
+                    message: user_input[2..].join(" "),
+                }
+            }
         }
-        "/send-message" => {
-            // /send-message <message>
+        "/list-files" => {
+            Command::ListFiles
         }
-        "/list_files" => {
-            // /list_files
+        "/list-peers" => {
+            Command::ListPeers
         }
-        "/list_peers" => {
-            // /list_peers
+        "/set-nickname" => {
+            Command::SetNickname { 
+                new_nickname: (user_input[1].to_string()) 
+            }
         }
-        "/set_nickname" => {
-            // /set_nickname <nickname>
+        "/post-offer" => {
+            Command::PostOffer
         }
-        "/post_offer" => {
-            // /post_offer <file_name>
-        }
-        "/request_file" => {
-            // /request_file <file_name>
+        "/request-file" => {
+            Command::RequestFile
         }
         "/accept-file" => {
-            // /accept-file <file_name>
+            Command::AcceptFile
         }
         "/cancel-file" => {
-            // /cancel-file <file_name>
+            Command::CancelFile
         }
         "/connect" => {
-            // /connect <peer_address>
+            Command::Connect
         }
         "/exit" => {
-            // /exit
+            Command::Exit
         }
-
+        "/help" => {
+            Command::Help
+        }
         _ => {
-            println!("Unknown command");
+            Command::Unknown
         }
     }
 
@@ -423,4 +482,98 @@ async fn _handle_command(input: &str) {
     //     //         .put_record(record, kad::Quorum::One)
     //     //         .expect("Failed to store record locally.");
     //     // }
+}
+
+
+pub fn handle_command(swarm: &mut Swarm<ChatBehaviour>, command: Command) {
+    match command {
+        Command::Error => {
+            println!("Please use the command correctly!")
+        }
+
+        Command::DirectMessage { peer_nickname, message } => {
+            let mut state = STATE.lock().unwrap();
+            
+            // Find the peer ID associated with the nickname
+            let peer_id = state.nicknames.iter()
+                .find_map(|(id, nickname)| if nickname == &peer_nickname { Some(id.clone()) } else { None });
+            
+            if let Some(peer_id) = peer_id {
+                // Create a request to send the message
+                let request = FileRequest(message);
+                
+                // Send the request to the peer
+                swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+                println!("Sent direct message to {}", peer_nickname);
+            } else {
+                println!("Peer with nickname {} not found.", peer_nickname);
+            }
+        }
+
+        Command::SetNickname { new_nickname } => {
+            
+            // state.nickname = new_nickname.clone();
+            // println!("Nickname set to: {}", new_nickname);
+            // // Update kademlia or nicknames accordingly
+        }
+        
+        Command::Message { message, room } => { 
+            // create a new topic
+            let topic = gossipsub::IdentTopic::new(room);
+
+            // Publish the message with the user's nickname prepended
+            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, message.as_bytes()) {
+                println!("Publish error: {e:?}");
+            }
+        }
+
+        Command::ListPeers => {
+            println!("Listing all available peers, would you like to contact one?");
+            let state = STATE.lock().unwrap(); // unlock the state
+            let peers = state.nicknames.clone(); // access the state safely
+            for (_peer_id, nickname) in peers {
+                if state.nickname == nickname {
+                    continue;
+                }
+                println!("{}", nickname);
+            }
+        }
+
+        Command::ListFiles => {
+            println!("Listing all available files, with their respective peers:");
+        }
+
+
+        Command::PostOffer => {
+            println!("Posting offer");
+        }
+
+        Command::RequestFile => {
+            println!("Requesting file");
+        }
+
+        Command::AcceptFile => {
+            println!("Accepting file");
+        }
+
+        Command::CancelFile => {
+            println!("Cancelling file");
+        }
+
+        Command::Connect => {
+            println!("Connecting");
+        }
+
+        Command::Exit => {
+            println!("Exiting");
+        }
+
+        Command::Help => {
+            println!("Help");
+        }
+
+        Command::Unknown => {
+            println!("Unknown command");
+        }
+    }
 }
