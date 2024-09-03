@@ -24,6 +24,7 @@ dependencies = [
  "serde",
  "serde_cbor",
  "strum",
+ "termios",
  "time",
  "tokio",
  "tracing",
@@ -3297,6 +3298,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a75fb188eb626b924683e3b95e3a48e63551fcfb51949de2f06a9d91dbee93c9"
 dependencies = [
  "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
+name = "termios"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "411c5bf740737c7918b8b1fe232dca4dc9f8e754b8ad5e20966814001ed0ac6b"
+dependencies = [
  "libc",
 ]
 

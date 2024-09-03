@@ -20,6 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 ratatui = { version = "0.28.1", features = ["widget-calendar"] }
 itertools = "0.13.0"
 unicode-width = "0.1.13"
+termios = "0.3"
 color-eyre = "0.6.3"
 crossterm = "0.28.1"
 strum = "0.26.3"
