@@ -10,6 +10,7 @@ use libp2p::{
     tcp, yamux, PeerId,
 };
 use serde::{Deserialize, Serialize};
+use SwapBytes::network;
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
@@ -22,15 +23,12 @@ use tokio::{
 
 use color_eyre::Result;
 use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Layout, Position},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block, List, ListItem, Paragraph},
-    DefaultTerminal, Frame,
-};
-
-mod network;
+    Frame,
+}; 
 
 // a macro that is defined by libp2p called network behaviour
 #[derive(NetworkBehaviour)]
@@ -44,7 +42,7 @@ pub struct ChatBehaviour {
 }
 
 #[derive(Parser, Debug)]
-#[clap(name = "libp2p file sharing example")]
+#[clap(name = "SwapBytes application")]
 struct Opt {
     #[clap(long)]
     peer: Option<Multiaddr>,
@@ -82,6 +80,8 @@ impl Default for State {
         State::GlobalChat // Set the default variant to GlobalChat
     }
 }
+
+use network::behaviour;
 
 #[derive(Default)]
 pub struct GlobalState {
@@ -128,47 +128,50 @@ pub struct DirectMessageResponse(pub String);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )? // how are we going to send the bits back and forth across our network?
-        .with_quic() // will upgrade from TCP to QUIC if it can...
-        .with_behaviour(|key| {
-            Ok(ChatBehaviour {
-                mdns: mdns::tokio::Behaviour::new(
-                    mdns::Config::default(),
-                    key.public().to_peer_id(),
-                )?,
-                gossipsub: gossipsub::Behaviour::new(
-                    gossipsub::MessageAuthenticity::Signed(key.clone()),
-                    gossipsub::Config::default(),
-                )?,
-                request_response: request_response::cbor::Behaviour::new(
-                    [(
-                        StreamProtocol::new("/file-exchange/1"),
-                        ProtocolSupport::Full,
-                    )],
-                    request_response::Config::default(),
-                ),
-                kademlia: kad::Behaviour::new(
-                    key.public().to_peer_id(),
-                    MemoryStore::new(key.public().to_peer_id()),
-                ),
-            })
-        })?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
-        .build();
+    // swarm
+    let (mut client, mut _event_receiver, event_loop) = behaviour::swarm().await?;
 
-    swarm.behaviour_mut().kademlia.set_mode(Some(kad::Mode::Server));
-    swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
-
-    // // swarm
-    // let (mut client, mut _event_receiver, event_loop) = network::swarm().await?
     // start event loop
-    //spawn(event_loop.run());
+    spawn(event_loop.run());
+
+
+    // working swarm!
+    // let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+    //     .with_tokio()
+    //     .with_tcp(
+    //         tcp::Config::default(),
+    //         noise::Config::new,
+    //         yamux::Config::default,
+    //     )? // how are we going to send the bits back and forth across our network?
+    //     .with_quic() // will upgrade from TCP to QUIC if it can...
+    //     .with_behaviour(|key| {
+    //         Ok(ChatBehaviour {
+    //             mdns: mdns::tokio::Behaviour::new(
+    //                 mdns::Config::default(),
+    //                 key.public().to_peer_id(),
+    //             )?,
+    //             gossipsub: gossipsub::Behaviour::new(
+    //                 gossipsub::MessageAuthenticity::Signed(key.clone()),
+    //                 gossipsub::Config::default(),
+    //             )?,
+    //             request_response: request_response::cbor::Behaviour::new(
+    //                 [(
+    //                     StreamProtocol::new("/file-exchange/1"),
+    //                     ProtocolSupport::Full,
+    //                 )],
+    //                 request_response::Config::default(),
+    //             ),
+    //             kademlia: kad::Behaviour::new(
+    //                 key.public().to_peer_id(),
+    //                 MemoryStore::new(key.public().to_peer_id()),
+    //             ),
+    //         })
+    //     })?
+    //     .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
+    //     .build();
+
+    // swarm.behaviour_mut().kademlia.set_mode(Some(kad::Mode::Server));
+    // swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
 
     println!("Please enter a nickname:");
     let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
@@ -409,7 +412,10 @@ pub enum Command {
     SetNickname {
         new_nickname: String,
     },
-    PostOffer,
+    PostOffer {
+        file_name: String,
+        sender: String,
+    },
     RequestFile,
     AcceptFile,
     CancelFile,
@@ -470,7 +476,17 @@ async fn create_command(input: &str) -> Command {
                 }
             }
         }
-        "/post-offer" => Command::PostOffer,
+        "/post-offer" => {
+            if user_input.len() < 2 || (user_input.len() > 3) {
+                println!("Usage: /post-offer <file_name>");
+                Command::Error
+            } else {
+                Command::PostOffer {
+                    file_name: user_input[1].to_string(),
+                    sender: user_input[2].to_string(),
+                }
+            }
+        },
         "/request-file" => Command::RequestFile,
         "/accept-file" => Command::AcceptFile,
         "/cancel-file" => Command::CancelFile,
@@ -605,8 +621,8 @@ pub fn handle_command(swarm: &mut Swarm<ChatBehaviour>, command: Command) {
             println!("Listing all available files, with their respective owners:");
         }
 
-        Command::PostOffer => {
-            println!("Posting offer");
+        Command::PostOffer { file_name, sender } => {
+            //
         }
 
         Command::RequestFile => {
@@ -717,6 +733,7 @@ pub fn handle_command(swarm: &mut Swarm<ChatBehaviour>, command: Command) {
         }
     }
 }
+
 
 /// App holds the state of the application
 struct App {
