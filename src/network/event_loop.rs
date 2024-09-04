@@ -105,20 +105,36 @@ impl EventLoop {
                 message_id: _id,
                 message,
             })) => {
-                let state = STATE.lock().unwrap();
-                let peer_nickname = state.nicknames.get(&peer_id);
+                // Lock the state
+                let mut state = STATE.lock().unwrap();
 
-                if peer_nickname.is_none() {
-                    println!("Unkown: {}", String::from_utf8_lossy(&message.data));
+                // Fetching the nickname from the state (before update)
+                let mut nickname = state.nicknames.get(&peer_id).cloned();
+
+                // Fetching the nickname from kademlia...
+                let key_string = peer_id.to_string();
+                let key = kad::RecordKey::new(&key_string);
+                let query_id = self.swarm.behaviour_mut().kademlia.get_record(key);
+                state.queries.insert(query_id, peer_id);
+
+                // After fetching from kademlia, update the nickname if it's different
+                let stored_peer_nickname = state.nicknames.get(&peer_id).cloned();
+                if nickname != stored_peer_nickname {
+                    nickname = stored_peer_nickname;
+                }
+
+                // Handle the message based on the updated nickname
+                if nickname.is_none() {
+                    println!("Unknown: {}", String::from_utf8_lossy(&message.data));
                 } else {
                     let message = String::from_utf8_lossy(&message.data);
-                    if message.clone().starts_with("/dm") {
+                    if message.starts_with("/dm") {
                         let message_stripped = message.strip_prefix("/dm").unwrap_or(&message);
-                        println!("[From] {}: {}", peer_nickname.unwrap(), message_stripped);
+                        println!("[From] {}: {}", nickname.unwrap(), message_stripped);
                     } else if state.current_room == "global-chat" {
-                        println!("[Global Chat] {}: {}", peer_nickname.unwrap(), message.clone());
+                        println!("[Global Chat] {}: {}", nickname.unwrap(), message);
                     } else {
-                        println!("[{}] {}: {}", state.current_room, peer_nickname.unwrap(), message.clone());
+                        println!("[{}] {}: {}", state.current_room, nickname.unwrap(), message);
                     }
                 }
             },
@@ -166,7 +182,7 @@ impl EventLoop {
                                 if state.queries.contains_key(&id) {
                                     let peer_id = state.queries.remove(&id).expect("Message was not in queue");
                                     state.nicknames.insert(peer_id.clone(), nickname.clone());
-                                    println!("{} has joined the chat!", nickname.clone());
+                                    //println!("{} has joined the chat!", nickname.clone());
                                     // println!("Added peer {} with nickname {}", peer_id, nickname); 
                                 }
                             }
