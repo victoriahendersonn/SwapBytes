@@ -12,14 +12,45 @@ use libp2p::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_cbor::Value;
+use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::string;
 
 use crate::state::{GlobalState, STATE};
 use std::sync::{Arc, Mutex, MutexGuard};
 use super::behaviour::{ChatBehaviour, ChatBehaviourEvent};
 use super::command::Command;
 
+
+
+
+#[derive(Debug)]
+pub enum Event {
+    InboundRequest {
+        request: String,
+        channel: ResponseChannel<FileResponse>,
+    },
+}
+
+/**
+ * Part of the file exchange protocol for the application,
+ * responsible for the request.
+ */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRequest(pub String);
+
+/**
+ * Part of the file exchange protocol for the application,
+ * responsible for the response.
+ */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileResponse(pub Vec<u8>);
+
+/**
+ * 
+ */
 pub struct EventLoop {
     pub swarm: Swarm<ChatBehaviour>,
     pub command_receiver: mpsc::Receiver<Command>,
@@ -31,6 +62,9 @@ pub struct EventLoop {
         HashMap<OutboundRequestId, oneshot::Sender<Result<Vec<u8>, Box<dyn Error + Send>>>>,
 }
 
+/**
+ * 
+ */
 impl EventLoop {
     pub fn new(
         swarm: Swarm<ChatBehaviour>,
@@ -65,24 +99,26 @@ impl EventLoop {
         match event {
             SwarmEvent::Behaviour(ChatBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                 for (peer_id, multiaddr) in list {
-                    //println!("Discovered peer: {} at {}", peer_id, multiaddr);
+                    // Discovered peer: peer_id at multiaddr.
+                    let mut state = STATE.lock().unwrap();
+                    
+                    // Adding the peer to our  network.
                     self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                     self.swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
 
-                    // fetching the nickname from kademlia
+
+                    // Fetching the nickname from kademlia
                     let key_string = peer_id.to_string();
                     let key = kad::RecordKey::new(&key_string);
                     let query_id = self.swarm.behaviour_mut().kademlia.get_record(key);
-                    let mut state = STATE.lock().unwrap();
-                    state.queries.insert(query_id, peer_id);
+                    state.queries.insert(query_id, peer_id); 
 
 
-                    // Create DM topic for the peers, though it will not be available unless they’ve accepted a trade
-                    let local_peer_id = self.swarm.local_peer_id().clone();
-                    let ids = vec![local_peer_id.to_base58(), peer_id.to_base58()];
+                    // Create DM topic for the peers, though it will not be available unless they've accepted it previously TODO.
+                    let ids = vec![state.peer_id.clone(), peer_id.to_string()];
                     let mut sorted_ids = ids;
-                    sorted_ids.sort(); // Sort IDs alphabetically
-
+                    sorted_ids.sort(); // Sort IDs alphabetically, to ensure the same topic for each peer.
+    
                     // Create a topic string using a separator to ensure valid topic names
                     let topic = format!("/dm/{}", sorted_ids.join("_")); // Using underscore as a separator
                     let topic_id = gossipsub::IdentTopic::new(&topic.to_string());
@@ -95,7 +131,7 @@ impl EventLoop {
             },
             SwarmEvent::Behaviour(ChatBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                 for (peer_id, multiaddr) in list {
-                    //println!("mDNS discover peer has expired: {peer_id}");
+                    // mDNS discoverd peer has expired: {peer_id}
                     self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                     self.swarm.behaviour_mut().kademlia.remove_address(&peer_id, &multiaddr);
                 }
@@ -131,8 +167,6 @@ impl EventLoop {
                     if message.starts_with("/dm") {
                         let message_stripped = message.strip_prefix("/dm").unwrap_or(&message);
                         println!("[From] {}: {}", nickname.unwrap(), message_stripped);
-                    } else if state.current_room == "global-chat" {
-                        println!("[Global Chat] {}: {}", nickname.unwrap(), message);
                     } else {
                         println!("[{}] {}: {}", state.current_room, nickname.unwrap(), message);
                     }
@@ -141,13 +175,14 @@ impl EventLoop {
             SwarmEvent::NewListenAddr { address, .. } => {
                 //println!("Local node is listening on {address}");
                 if address.to_string().contains("/ip4/127.0.0.1/udp") {
+                    let state = STATE.lock().unwrap();
 
+                    // TODO 
                     let peer_id = self.swarm.local_peer_id().clone();
                     self.swarm.behaviour_mut().kademlia.add_address(&peer_id, address);
 
-                    let state = STATE.lock().unwrap();
-                    let nickname_bytes = serde_cbor::to_vec(&state.nickname).unwrap();
-                    let key: String = peer_id.to_string();
+                    let nickname_bytes: Vec<u8> = serde_cbor::to_vec(&KademliaRecords::Nickname(state.nickname.to_string())).unwrap();
+                    let key: String = state.peer_id.to_string();
 
                     let record = kad::Record {
                         key: kad::RecordKey::new(&key),
@@ -176,16 +211,31 @@ impl EventLoop {
                             ..
                         })
                     )) => {
-                        match serde_cbor::from_slice::<String>(&value) {
-                            Ok(nickname) => {
-                                let mut state = STATE.lock().unwrap();
+                        let mut state = STATE.lock().unwrap();
+                        
+                        match serde_cbor::from_slice::<KademliaRecords>(&value) {
+                            
+                            Ok(KademliaRecords::Nickname(nickname)) => {
                                 if state.queries.contains_key(&id) {
                                     let peer_id = state.queries.remove(&id).expect("Message was not in queue");
                                     state.nicknames.insert(peer_id.clone(), nickname.clone());
-                                    //println!("{} has joined the chat!", nickname.clone());
-                                    // println!("Added peer {} with nickname {}", peer_id, nickname); 
+                                    // TODO println!("{} has joined the chat!", nickname.clone());
+                                    // TODO println!("Added peer {} with nickname {}", peer_id, nickname); 
                                 }
                             }
+
+                            Ok(KademliaRecords::Rooms(rooms)) => {
+                                // Update local states and subscribe the user to all available rooms
+                                for (room, messages) in rooms.iter() {
+                                    if !state.rooms.contains_key(room) {
+                                        state.rooms.insert(room.to_string(), messages.to_vec());
+                                    }
+
+                                    let topic = gossipsub::IdentTopic::new(room.to_string());
+                                    self.swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+                                }
+                            }
+
                             Err(e) => {
                                 println!("Failed to decode nickname: {}", e); // Optional: Add this line to check decoding errors
                             }
@@ -354,7 +404,7 @@ impl EventLoop {
                 let key = kad::RecordKey::new(&peer_id.to_string());
                 let record = kad::Record {
                     key,
-                    value: serde_cbor::to_vec(&new_nickname).unwrap(),
+                    value: serde_cbor::to_vec(&KademliaRecords::Nickname(new_nickname.to_string())).unwrap(),
                     publisher: None,
                     expires: None,
                 };
@@ -384,15 +434,10 @@ impl EventLoop {
                     .publish(topic.clone(), message.as_bytes())
                 {
                     if e.to_string().contains("InsufficientPeers") {
-                        if topic.clone().to_string() == "global-chat" {
-                            println!("No one can hear you... [No peers subscribed to global chat]");
-                            println!("[Global Chat] You: {}", message);
-                        } else {
-                            println!("No one can hear you... [No peers subscribed to the {} chat]", topic.to_string());
-                            println!("[{}] You: {}", topic.to_string(), message);
-                        }
+                        println!("[Note:] No peers subscribed to the {} chat", topic.to_string());
+                        println!("[{}] You: {}", topic.to_string(), message);
                     } else {
-                        println!("Publish error: {e:?}");
+                        println!("[Error]: Unable to publish your message.");
                     } 
                 } else {
                     println!("[Global Chat] You: {}", message);
@@ -422,17 +467,66 @@ impl EventLoop {
                 }
             }
     
-            Command::CreateRoom => {
-                println!("Creating room");
+            // Creates a room/chat with the name that was given.
+            Command::CreateRoom { name } => {
+                let peer_id = state.peer_id.clone();
+                let current_rooms = state.rooms.clone();
+
+                if current_rooms.contains_key(&name) {
+                    println!("Unable to create room, {} already exists.", name);
+                } else if (&name).is_empty() {
+                    println!("Unable to create room, name is empty.");
+                } else if name == "Global Chat" {
+                    println!("Unable to create room, Global Chat already exists.");
+                } else {
+                    // Update the local state with the new room.
+                    state.rooms.insert(name.clone(), vec![]);
+                    let topic = gossipsub::IdentTopic::new(name.clone());
+                    
+                    let seralized_rooms = serde_cbor::to_vec(&KademliaRecords::Rooms(state.rooms.clone())).unwrap();
+
+                    // Create Kademlia record for room TODO
+                    let key = kad::RecordKey::new(&"available_rooms");
+                    let record = kad::Record {
+                        key,
+                        value: seralized_rooms,
+                        publisher: None,
+                        expires: None
+                    };
+
+                    // Insert the room record into Kademlia.
+                    self.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One).expect("");
+
+                    // // Update the local state with the new room.
+                    // state.rooms.insert(name.clone(), vec![peer_id]);
+                    // let topic = gossipsub::IdentTopic::new(name.clone());
+                    self.swarm.behaviour_mut().gossipsub.subscribe(&topic).expect("");
+        
+                    println!("Creating room '{}', please change to this room when required.", name);
+                }
             }
     
-            Command::ChangeRoom => {
-                println!("Changing room");
+            Command::ChangeRoom { name } => {
+                let current_rooms = state.rooms.clone();
+                let current_room = state.current_room.clone();
+
+                if current_room == name {
+                    println!("You're already in the {} room.", name);
+                } else if (&name).is_empty() {
+                    println!("Unable to join a room that does not exist.");
+                } else if !current_rooms.contains_key(&name) {
+                    println!("Unable to join a room that does not exist. ");
+                } else {
+                    let topic = gossipsub::IdentTopic::new(state.current_room.clone());
+                    self.swarm.behaviour_mut().gossipsub.unsubscribe(&topic).expect("");
+                    state.current_room = name.clone();
+                    println!("Changing to the {} room.", name);
+                }
             }
     
             Command::ListRooms => {
                 println!("Listing all available rooms:");
-                for room in state.rooms.iter() {
+                for (room, _peer_ids) in state.rooms.iter() {
                     println!("{}", room);
                 }
             }
@@ -561,24 +655,10 @@ impl EventLoop {
     }
 }
 
-#[derive(Debug)]
-pub enum Event {
-    InboundRequest {
-        request: String,
-        channel: ResponseChannel<FileResponse>,
-    },
+
+// Defines all ... stored in the Kademlia DHT (TODO)
+#[derive(Serialize, Deserialize)]
+enum KademliaRecords {
+    Nickname(String), 
+    Rooms(HashMap<String, Vec<String>>)
 }
-
-/**
- * Part of the file exchange protocol for the application,
- * responsible for the request.
- */
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileRequest(pub String);
-
-/**
- * Part of the file exchange protocol for the application,
- * responsible for the response.
- */
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileResponse(pub Vec<u8>);

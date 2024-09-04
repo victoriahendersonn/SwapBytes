@@ -85,7 +85,7 @@ pub async fn swarm() -> Result<(), Box<dyn Error>> {
     let mut pending_queries: HashMap<QueryId, (PeerId, String)> = HashMap::new();
     let self_peer_id = swarm.local_peer_id().clone();
 
-    let global_chat = gossipsub::IdentTopic::new("global-chat"); // Define the global chat.
+    let global_chat = gossipsub::IdentTopic::new("Global Chat"); // Define the global chat.
     swarm.behaviour_mut().gossipsub.subscribe(&global_chat)?; // Subscribe to the global chat.
 	swarm.behaviour_mut().kademlia.set_mode(Some(Mode::Server));
 

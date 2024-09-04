@@ -1,39 +1,41 @@
-use futures::channel::{mpsc, oneshot};
+use futures::channel::mpsc;
 use futures::prelude::*;
-use futures::StreamExt;
 
 use libp2p::kad::store::MemoryStore;
-use libp2p::{
-    core::Multiaddr,
-    identity, kad,
+use libp2p::{ 
+    kad,
     noise,
-    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
-    tcp, yamux, PeerId,
+    request_response::{self, ProtocolSupport},
+    swarm::NetworkBehaviour,
+    tcp, yamux,
 };
 
 use libp2p::{gossipsub, mdns, StreamProtocol};
 use std::error::Error;
 use std::time::Duration;
 
-use tokio::{
-    io::{self, AsyncBufReadExt},
-};
-
+use tokio::io::{self, AsyncBufReadExt};
 
 use super::client::Client;
 use super::event_loop::{Event, EventLoop, FileRequest, FileResponse};
-use crate::state::{GlobalState, STATE};
-use super::command::Command;
+use crate::state::STATE;
 
-// a macro that is defined by libp2p called network behaviour
+// The main entry point of the network which defines the behaviour of the libp2p application.
 #[derive(NetworkBehaviour)]
 pub struct ChatBehaviour {
     // what is chat behaviour event then?
     // chat behaviour event gets added automatically (the compiler makes it!)
+
+    // mDNS behaviour for local peer discovery
     pub mdns: mdns::tokio::Behaviour,
+    
+    // Gossipsub behaviour for pub/sub message propagation.
     pub gossipsub: gossipsub::Behaviour,
+
+    // Request-Response behaviour for exchanging files.
     pub request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
+
+    // Kademlia DHT for p2p ... TODO
     pub kademlia: kad::Behaviour<MemoryStore>,
 }
 
@@ -72,20 +74,23 @@ pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), B
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    swarm
-        .behaviour_mut()
-        .kademlia
-        .set_mode(Some(kad::Mode::Server));
+    // Setting up network specifics, along with the address to listen on.
+    swarm.behaviour_mut().kademlia.set_mode(Some(kad::Mode::Server));
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
 
+    // Adding the Global Chat to the network.
+    let topic = gossipsub::IdentTopic::new("Global Chat");
+    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+
+    // Asking for the users's nickname.
     println!("Please enter a nickname:");
     let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
 
     {
+        // Adding user and network specific information to the local storage.
+        let mut state = STATE.lock().unwrap();
         let mut new_nickname = stdin.next_line().await.unwrap().unwrap();
         new_nickname = new_nickname.trim_start().trim_end().to_string();
-
-        let mut state = STATE.lock().unwrap();
         state.nickname = new_nickname.clone();
 
         println!(
@@ -94,19 +99,19 @@ pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), B
         );
 
         let peer_id = swarm.local_peer_id().clone();
+        state.peer_id = peer_id.to_string();
         state.nicknames.insert(peer_id, new_nickname.clone());
 
-        // gossipsub
-        let topic = gossipsub::IdentTopic::new("global-chat");
-        //println!("Welcome to the global chat room! Here your messages will be propogated to all peers in the network.");
-        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-        state.current_room = "global-chat".to_string();
-        state.rooms.push("global-chat".to_string());
+        state.current_room = "Global Chat".to_string();
+        state.rooms.insert("Global Chat".to_string(), vec![peer_id.to_string()]);
     }
 
+    // Setting up command and event channels.
 	let (command_sender, command_receiver) = mpsc::channel(0);
     let (event_sender, event_receiver) = mpsc::channel(0);
 
+    // Returning the Client, event stream, and EventLoop for the rest of the application to use
+    // and call to when necessary.
     Ok((
         Client {
             sender: command_sender,

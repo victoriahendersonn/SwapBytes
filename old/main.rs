@@ -39,8 +39,8 @@ pub use self::{
 //         Self {
 //             users: vec![],
 //             current_user: None,
-//             rooms: vec!["global-chat".to_string()],
-//             current: "global-chat".to_string(),
+//             rooms: vec!["Global Chat".to_string()],
+//             current: "Global Chat".to_string(),
 //         }
 //     }
 // }

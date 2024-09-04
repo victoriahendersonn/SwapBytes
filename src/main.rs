@@ -168,6 +168,26 @@ async fn create_command(input: &str) -> Command {
                 }
             }
         }
+        "/create-room" => {
+            if user_input.len() < 2 || user_input.len() > 2 {
+                println!("Usage: /create-room <room-name>");
+                Command::Error
+            } else {
+                Command::CreateRoom { 
+                    name: (user_input[1].to_string()) 
+                }
+            }
+        }   
+        "/change-room" => {
+            if user_input.len() < 2 {
+                println!("Usage: /change-room <room-name>");
+                Command::Error
+            } else {
+                Command::ChangeRoom { 
+                    name: (user_input[1..].join(" ")) 
+                }
+            }
+        }
         "/trade" => {
             if user_input.len() < 2 || user_input.len() > 3 {
                 Command::Error

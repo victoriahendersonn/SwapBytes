@@ -1,7 +1,6 @@
 use futures::channel::oneshot;
 
 use libp2p::{
-    core::Multiaddr,
     request_response::ResponseChannel,
     PeerId,
 };
@@ -51,8 +50,12 @@ pub enum Command {
     SetNickname {
         new_nickname: String,
     },
-    CreateRoom,
-    ChangeRoom,
+    CreateRoom {
+        name: String,
+    },
+    ChangeRoom {
+        name: String,
+    },
     ListRooms,
     Exit,
     Help,
