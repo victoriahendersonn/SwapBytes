@@ -166,7 +166,8 @@ impl EventLoop {
                                 if state.queries.contains_key(&id) {
                                     let peer_id = state.queries.remove(&id).expect("Message was not in queue");
                                     state.nicknames.insert(peer_id.clone(), nickname.clone());
-                                    println!("Added peer {} with nickname {}", peer_id, nickname); // Add this line
+                                    println!("{} has joined the chat!", nickname.clone());
+                                    // println!("Added peer {} with nickname {}", peer_id, nickname); 
                                 }
                             }
                             Err(e) => {
@@ -394,9 +395,14 @@ impl EventLoop {
             }
     
             Command::ListFiles => {
-                println!("Listing all available files, with their respective owners:");
-                for (file, owner) in state.files.iter() {
-                    println!("{} - {}", file, state.nicknames.get(owner).unwrap());
+                let files = state.files.clone();
+                if files.len() <= 0 {
+                    println!("Currently there are no available files.");
+                } else {
+                    println!("Listing all available files, with their respective owners:");
+                    for (file, owner) in state.files.iter() {
+                        println!("{} - {}", file, state.nicknames.get(owner).unwrap());
+                    }
                 }
             }
     
@@ -495,6 +501,7 @@ impl EventLoop {
             }
             
             Command::StartProviding { file_name, sender } => {
+                println!("You are now providing the file: {}!", file_name);
                 let query_id = self
                     .swarm
                     .behaviour_mut()
@@ -503,7 +510,9 @@ impl EventLoop {
                     .expect("No store error.");
                 self.pending_start_providing.insert(query_id, sender);
             }
+
             Command::GetProviders { file_name, sender } => {
+                println!("hello :)");
                 let query_id = self
                     .swarm
                     .behaviour_mut()
@@ -511,6 +520,7 @@ impl EventLoop {
                     .get_providers(file_name.into_bytes().into());
                 self.pending_get_providers.insert(query_id, sender);
             }
+
             Command::RequestFile {
                 file_name,
                 peer,
@@ -523,6 +533,7 @@ impl EventLoop {
                     .send_request(&peer, FileRequest(file_name));
                 self.pending_request_file.insert(request_id, sender);
             }
+            
             Command::RespondFile { file, channel } => {
                 self.swarm
                     .behaviour_mut()

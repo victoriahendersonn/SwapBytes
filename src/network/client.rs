@@ -2,7 +2,6 @@ use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 
 use libp2p::{
-    core::Multiaddr,
     request_response::ResponseChannel,
     PeerId,
 };
@@ -13,6 +12,7 @@ use std::error::Error;
 use super::event_loop::FileResponse;
 use super::command::Command;
 
+#[derive(Clone)]
 pub struct Client {
     pub sender: mpsc::Sender<Command>,
 }

@@ -82,13 +82,14 @@ pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), B
     let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
 
     {
-        let new_nickname = stdin.next_line().await.unwrap().unwrap();
+        let mut new_nickname = stdin.next_line().await.unwrap().unwrap();
+        new_nickname = new_nickname.trim_start().trim_end().to_string();
 
         let mut state = STATE.lock().unwrap();
         state.nickname = new_nickname.clone();
 
         println!(
-            "Welcome to SwapBytes, {}! Please enter chat messages one line at a time.",
+            "Welcome to SwapBytes, {}! Please enter chat messages one line at a time or type \\help for a list of available commands.",
             state.nickname
         );
 
