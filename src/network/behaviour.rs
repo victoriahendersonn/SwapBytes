@@ -6,7 +6,6 @@ use libp2p::kad::store::MemoryStore;
 use libp2p::{
     core::Multiaddr,
     identity, kad,
-    multiaddr::Protocol,
     noise,
     request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
@@ -17,8 +16,15 @@ use libp2p::{gossipsub, mdns, StreamProtocol};
 use std::error::Error;
 use std::time::Duration;
 
+use tokio::{
+    io::{self, AsyncBufReadExt},
+};
+
+
 use super::client::Client;
 use super::event_loop::{Event, EventLoop, FileRequest, FileResponse};
+use crate::state::{GlobalState, STATE};
+use super::command::Command;
 
 // a macro that is defined by libp2p called network behaviour
 #[derive(NetworkBehaviour)]
@@ -71,6 +77,31 @@ pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), B
         .kademlia
         .set_mode(Some(kad::Mode::Server));
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
+
+    println!("Please enter a nickname:");
+    let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
+
+    {
+        let new_nickname = stdin.next_line().await.unwrap().unwrap();
+
+        let mut state = STATE.lock().unwrap();
+        state.nickname = new_nickname.clone();
+
+        println!(
+            "Welcome to SwapBytes, {}! Please enter chat messages one line at a time.",
+            state.nickname
+        );
+
+        let peer_id = swarm.local_peer_id().clone();
+        state.nicknames.insert(peer_id, new_nickname.clone());
+
+        // gossipsub
+        let topic = gossipsub::IdentTopic::new("global-chat");
+        //println!("Welcome to the global chat room! Here your messages will be propogated to all peers in the network.");
+        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+        state.current_room = "global-chat".to_string();
+        state.rooms.push("global-chat".to_string());
+    }
 
 	let (command_sender, command_receiver) = mpsc::channel(0);
     let (event_sender, event_receiver) = mpsc::channel(0);

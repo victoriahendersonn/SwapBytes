@@ -30,4 +30,32 @@ pub enum Command {
         file: Vec<u8>,
         channel: ResponseChannel<FileResponse>,
     },
+    Message {
+        room: String,
+        message: String,
+    },
+    DirectMessage {
+        peer_nickname: String,
+        message: String,
+    },
+    TradeRequest {
+        peer_nickname: String,
+        message: Option<String>,
+    },
+    TradeResponse {
+        peer_nickname: String,
+        message: Option<String>,
+    },
+    ListFiles,
+    ListPeers,
+    SetNickname {
+        new_nickname: String,
+    },
+    CreateRoom,
+    ChangeRoom,
+    ListRooms,
+    Exit,
+    Help,
+    Unknown,
+    Error,
 }
