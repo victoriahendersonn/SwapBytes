@@ -154,6 +154,7 @@ async fn create_command(input: &str) -> Command {
     match user_input[0] {
         "/dm" => {
             if user_input.len() < 3 {
+                // TODO if the user has a long username then ... it can't find because it just assumes the rest of the user is the message
                 println!("Usage: /dm <peer_nickname> <message>");
                 Command::Error
             } else {
