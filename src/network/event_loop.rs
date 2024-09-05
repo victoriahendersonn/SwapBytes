@@ -2,27 +2,26 @@ use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::StreamExt;
 
+use libp2p::kad::store::MemoryStore;
+use libp2p::kad::Behaviour;
 use libp2p::{gossipsub, mdns};
 use libp2p::{
     kad,
-    multiaddr::Protocol,
     request_response::{self, OutboundRequestId, ResponseChannel},
     swarm::{Swarm, SwarmEvent},
     PeerId,
 };
 
 use serde::{Deserialize, Serialize};
-use serde_cbor::Value;
-use std::any::TypeId;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::string;
 
 use crate::state::{GlobalState, STATE};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::MutexGuard;
 use super::behaviour::{ChatBehaviour, ChatBehaviourEvent};
 use super::command::Command;
-
 
 
 
@@ -106,13 +105,10 @@ impl EventLoop {
                     self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                     self.swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
 
-
                     // Fetching the nickname from kademlia
-                    let key_string = peer_id.to_string();
-                    let key = kad::RecordKey::new(&key_string);
-                    let query_id = self.swarm.behaviour_mut().kademlia.get_record(key);
-                    state.queries.insert(query_id, peer_id); 
-
+                    fetch_nickname(peer_id, &mut self.swarm.behaviour_mut().kademlia, &mut state);
+                    // Fetching the rooms from kademlia
+                    fetch_rooms(*self.swarm.local_peer_id(), &mut self.swarm.behaviour_mut().kademlia, &mut state);
 
                     // Create DM topic for the peers, though it will not be available unless they've accepted it previously TODO.
                     let ids = vec![state.peer_id.clone(), peer_id.to_string()];
@@ -147,11 +143,8 @@ impl EventLoop {
                 // Fetching the nickname from the state (before update)
                 let mut nickname = state.nicknames.get(&peer_id).cloned();
 
-                // Fetching the nickname from kademlia...
-                let key_string = peer_id.to_string();
-                let key = kad::RecordKey::new(&key_string);
-                let query_id = self.swarm.behaviour_mut().kademlia.get_record(key);
-                state.queries.insert(query_id, peer_id);
+                // Fetching the nickname from kademlia
+                fetch_nickname(peer_id, &mut self.swarm.behaviour_mut().kademlia, &mut state);
 
                 // After fetching from kademlia, update the nickname if it's different
                 let stored_peer_nickname = state.nicknames.get(&peer_id).cloned();
@@ -164,11 +157,13 @@ impl EventLoop {
                     println!("Unknown: {}", String::from_utf8_lossy(&message.data));
                 } else {
                     let message = String::from_utf8_lossy(&message.data);
+                    let current_room = format!("[{}]", state.current_room);
+
                     if message.starts_with("/dm") {
                         let message_stripped = message.strip_prefix("/dm").unwrap_or(&message);
-                        println!("[From] {}: {}", nickname.unwrap(), message_stripped);
-                    } else {
-                        println!("[{}] {}: {}", state.current_room, nickname.unwrap(), message);
+                        println!("{}", message_stripped);
+                    } else if message.starts_with(&current_room) {
+                        println!("{}", message);
                     }
                 }
             },
@@ -301,23 +296,46 @@ impl EventLoop {
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
-                    self.event_sender
-                        .send(Event::InboundRequest {
-                            request: request.0,
-                            channel,
-                        })
-                        .await
-                        .expect("Event receiver not to be dropped.");
+                    // A request has been received.
+                    println!("Request {:?}", request);
+
+                    let filename = request.0;
+                    let file_bytes = match File::open(filename).await {
+                        Ok(mut file) => {
+                            let mut buffer = Vec::new();
+                            // read the file into a buffer
+                            let _ = file.read_to_end(&mut buffer).await;
+                            buffer
+                        }
+                        // if the file doesn't exist just send empty byte array in response
+                        Err(_) => vec![],
+                    };
+                    // send the response to the file requester
+                    self.swarm.behaviour_mut().request_response.send_response(channel, FileResponse(file_bytes)).unwrap();
+
+                    // self.event_sender
+                    //     .send(Event::InboundRequest {
+                    //         request: request.0,
+                    //         channel,
+                    //     })
+                    //     .await
+                    //     .expect("Event receiver not to be dropped.");
                 }
+
+                // Recieving a response.
                 request_response::Message::Response {
                     request_id,
                     response,
                 } => {
-                    let _ = self
-                        .pending_request_file
-                        .remove(&request_id)
-                        .expect("Request to still be pending.")
-                        .send(Ok(response.0));
+                    // let _ = self
+                    //     .pending_request_file
+                    //     .remove(&request_id)
+                    //     .expect("Request to still be pending.")
+                    //     .send(Ok(response.0));
+
+                    // response has the vector of bytes sent from the file server
+                    // here we just print, but you could save it or do something else with it
+                    println!("response {:?}", response);
                 }
             },
             SwarmEvent::Behaviour(ChatBehaviourEvent::RequestResponse(
@@ -334,6 +352,16 @@ impl EventLoop {
             SwarmEvent::Behaviour(ChatBehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent { .. },
             )) => {}
+            SwarmEvent::ConnectionEstablished {
+                peer_id, ..
+            } => {
+                // if we've established a connection, then save the peer id in `other_peer_id` for later use
+                let other_peer_id = Some(peer_id);
+                println!("{:?}", peer_id);
+            }
+            other => {
+                println!("Unhandled {:?}", other);
+            }
             _ => {}
             //e => panic!("{e:?}"),
         }
@@ -381,7 +409,7 @@ impl EventLoop {
                     let topic = format!("/dm/{}", sorted_ids.join("_")); // Using underscore as a separator
                     let topic_id = gossipsub::IdentTopic::new(&topic.to_string());
     
-                    let data = ("/dm".to_string() + &message).as_bytes().to_vec();
+                    let data = ("/dm".to_string() + "[From]: " + &state.nickname.to_string() + &message).as_bytes().to_vec();
                     self.swarm
                         .behaviour_mut()
                         .gossipsub
@@ -424,23 +452,25 @@ impl EventLoop {
             }
     
             Command::Message { message, room } => {
-                // create a new topic
-                let topic = gossipsub::IdentTopic::new(room);
-    
-                // Publish the message with the user's nickname prepended
+                // Create a new topic
+                let topic = gossipsub::IdentTopic::new(room.clone());
+
+                // Format the message with room and nickname
+                let formatted_message = format!("[{}] {}: {}", room, state.nickname, message);
+
+                // Publish the message
                 if let Err(e) = self.swarm
                     .behaviour_mut()
                     .gossipsub
-                    .publish(topic.clone(), message.as_bytes())
+                    .publish(topic.clone(),  formatted_message.as_bytes())
                 {
                     if e.to_string().contains("InsufficientPeers") {
-                        println!("[Note:] No peers subscribed to the {} chat", topic.to_string());
                         println!("[{}] You: {}", topic.to_string(), message);
                     } else {
                         println!("[Error]: Unable to publish your message.");
                     } 
                 } else {
-                    println!("[Global Chat] You: {}", message);
+                    println!("[{}] You: {}", topic.to_string(), message);
                 }
             }
     
@@ -497,12 +527,11 @@ impl EventLoop {
                     // Insert the room record into Kademlia.
                     self.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One).expect("");
 
-                    // // Update the local state with the new room.
-                    // state.rooms.insert(name.clone(), vec![peer_id]);
-                    // let topic = gossipsub::IdentTopic::new(name.clone());
-                    self.swarm.behaviour_mut().gossipsub.subscribe(&topic).expect("");
-        
+                    // Fetching the rooms from kademlia...
+                    fetch_rooms(*self.swarm.local_peer_id(), &mut self.swarm.behaviour_mut().kademlia, &mut state);
+
                     println!("Creating room '{}', please change to this room when required.", name);
+                    self.swarm.behaviour_mut().gossipsub.subscribe(&topic).expect("");
                 }
             }
     
@@ -517,14 +546,21 @@ impl EventLoop {
                 } else if !current_rooms.contains_key(&name) {
                     println!("Unable to join a room that does not exist. ");
                 } else {
-                    let topic = gossipsub::IdentTopic::new(state.current_room.clone());
-                    self.swarm.behaviour_mut().gossipsub.unsubscribe(&topic).expect("");
+                    // Change to the new chat!
                     state.current_room = name.clone();
                     println!("Changing to the {} room.", name);
+
+                    // Subscribe to the new chat!
+                    let topic = gossipsub::IdentTopic::new(name);
+                    self.swarm.behaviour_mut().gossipsub.subscribe(&topic).expect("");
                 }
             }
     
             Command::ListRooms => {
+                // Fetching the rooms from kademlia...
+                fetch_rooms(*self.swarm.local_peer_id(), &mut self.swarm.behaviour_mut().kademlia, &mut state);
+
+                // After fetching from kademlia, print out all available rooms
                 println!("Listing all available rooms:");
                 for (room, _peer_ids) in state.rooms.iter() {
                     println!("{}", room);
@@ -611,7 +647,9 @@ impl EventLoop {
             }
             
             Command::StartProviding { file_name, sender } => {
-                println!("You are now providing the file: {}!", file_name);
+                println!("You are now providing the file: {}.", file_name);
+                state.files.insert(file_name.clone(), *self.swarm.local_peer_id());
+
                 let query_id = self
                     .swarm
                     .behaviour_mut()
@@ -622,7 +660,6 @@ impl EventLoop {
             }
 
             Command::GetProviders { file_name, sender } => {
-                println!("hello :)");
                 let query_id = self
                     .swarm
                     .behaviour_mut()
@@ -631,6 +668,7 @@ impl EventLoop {
                 self.pending_get_providers.insert(query_id, sender);
             }
 
+            // We want to request a file.
             Command::RequestFile {
                 file_name,
                 peer,
@@ -643,7 +681,7 @@ impl EventLoop {
                     .send_request(&peer, FileRequest(file_name));
                 self.pending_request_file.insert(request_id, sender);
             }
-            
+
             Command::RespondFile { file, channel } => {
                 self.swarm
                     .behaviour_mut()
@@ -658,7 +696,21 @@ impl EventLoop {
 
 // Defines all ... stored in the Kademlia DHT (TODO)
 #[derive(Serialize, Deserialize)]
-enum KademliaRecords {
+pub enum KademliaRecords {
     Nickname(String), 
     Rooms(HashMap<String, Vec<String>>)
+}
+
+// This function handles nickname retrieval via Kademlia
+fn fetch_nickname(peer_id: PeerId, kademlia: &mut Behaviour<MemoryStore>, state: &mut MutexGuard<GlobalState>) {
+    let key = kad::RecordKey::new(&peer_id.to_string());
+    let query_id = kademlia.get_record(key);
+    state.queries.insert(query_id, peer_id);
+}
+
+// This function handles room retrieval via Kademlia
+fn fetch_rooms(peer_id: PeerId, kademlia: &mut Behaviour<MemoryStore>, state: &mut MutexGuard<GlobalState>) {
+    let key = kad::RecordKey::new(&"available_rooms");
+    let query_id: kad::QueryId = kademlia.get_record(key);
+    state.queries.insert(query_id, peer_id);
 }

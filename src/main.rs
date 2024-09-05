@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let user_input: Vec<&str> = line.split_whitespace().collect();
 
                     if user_input[0] == "/start-providing" {
-                        if user_input.len() < 2 || (user_input.len() > 3) {
+                        if user_input.len() < 3 || (user_input.len() > 3) {
                             println!("Usage: /start-providing <file_path> <file_name>");
                         } else {
                             client.start_providing(user_input[2].to_string()).await;
@@ -91,7 +91,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 .map_err(|_| "None of the providers returned file.")?
                                 .0;
 
+                            println!("File contents: ");
                             std::io::stdout().write_all(&file_content)?;
+                        }
+                    } else if user_input[0] == "/request-file" {
+                        // usage /request-file <file-name> <nickname>
+                        // TODO
+                        let mut state = STATE.lock().unwrap();
+                        let peer_id = state.nicknames.get(libp2p::PeerId(user_input[1].to_string()));
+                        let connected_peer = libp2p::PeerId(state.connected_peer);
+                        if let Some(peer) = peer_id {
+                            self.swarm.dial(peer).unwrap();
+                        }
+                        
+                        let mut other_peer_id: Option<PeerId> = None;
+
+                        if let Some(peer_id) = other_peer_id {
+                            swarm.behaviour_mut().request_response.send_request(&peer_id, FileRequest(line.to_string()));
                         }
                     } else {
                         // it'll be a command, so need to create the command accodingly
@@ -199,7 +215,15 @@ async fn create_command(input: &str) -> Command {
             }
         }
         "/list-files" => Command::ListFiles,
-        "/list-rooms" => Command::ListRooms,
+        "/list-rooms" => {
+            if user_input.len() < 1 || user_input.len() > 1 {
+                println!("Usage: /list-rooms");
+                Command::Error
+            } else {
+                Command::ListRooms
+            }
+            
+        },
         "/list-peers" => {
             if (user_input.len() < 1) || (user_input.len() > 1) {
                 println!("Usage: /list-peers");

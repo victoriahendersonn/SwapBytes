@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{self, AsyncBufReadExt};
 
 use super::client::Client;
-use super::event_loop::{Event, EventLoop, FileRequest, FileResponse};
+use super::event_loop::{Event, EventLoop, FileRequest, FileResponse, KademliaRecords};
 use crate::state::STATE;
 
 // The main entry point of the network which defines the behaviour of the libp2p application.
@@ -104,6 +104,19 @@ pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), B
 
         state.current_room = "Global Chat".to_string();
         state.rooms.insert("Global Chat".to_string(), vec![peer_id.to_string()]);
+                    
+        let seralized_rooms = serde_cbor::to_vec(&KademliaRecords::Rooms(state.rooms.clone())).unwrap();
+
+        let key = kad::RecordKey::new(&"available_rooms");
+        let record = kad::Record {
+            key,
+            value: seralized_rooms,
+            publisher: None,
+            expires: None
+        };
+
+        // Insert the room record into Kademlia.
+        swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One).expect("");
     }
 
     // Setting up command and event channels.

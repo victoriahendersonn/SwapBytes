@@ -14,13 +14,15 @@ pub struct GlobalState {
 
     pub friends: Vec<String>,
 
+    pub connected_peer: String,
+
     pub queries: HashMap<QueryId, PeerId>,
 
     pub current_room: String, // Current room to message
     pub rooms: HashMap<String, Vec<String>>, // Room name -> Vec of messages
     pub subscriptions: HashMap<String, String>, // PeerID -> Room name
 
-    pub files: HashMap<String, PeerId>,
+    pub files: HashMap<String, PeerId>, // File name -> Associated PeerID
 }
 
 impl GlobalState {
