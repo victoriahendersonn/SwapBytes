@@ -10,11 +10,11 @@ pub struct GlobalState {
     pub peers: Vec<PeerId>,
 
     pub nickname: String,
-    pub nicknames: HashMap<PeerId, String>,
+    pub nicknames: HashMap<PeerId, String>, // PeerID -> Nickname
 
-    pub friends: Vec<String>,
+    pub friends: Vec<String>, // Nicknames of friends
 
-    pub connected_peer: String,
+    pub connected_peers: HashMap<String, PeerId>, // Nickname -> PeerId
 
     pub queries: HashMap<QueryId, PeerId>,
 

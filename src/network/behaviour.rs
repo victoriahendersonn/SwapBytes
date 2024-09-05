@@ -1,3 +1,6 @@
+use color_eyre::owo_colors::OwoColorize;
+use crossterm::style::Stylize;
+use crossterm::terminal;
 use futures::channel::mpsc;
 use futures::prelude::*;
 
@@ -20,6 +23,18 @@ use super::client::Client;
 use super::event_loop::{Event, EventLoop, FileRequest, FileResponse, KademliaRecords};
 use crate::state::STATE;
 
+const SWAPBYTES_LOGO: [&str; 9] = [
+"     _____                     ____        __           ",
+"    / ___/      ______ _____  / __ )__  __/ /____  _____",
+"    \\__ \\ | /| / / __ `/ __ \\/ __  / / / / __/ _ \\/ ___/",
+"   ___/ / |/ |/ / /_/ / /_/ / /_/ / /_/ / /_/  __(__  ) ",
+"  /____/|__/|__/\\__,_/ .___/_____/\\__, /\\__/\\___/____/  ",
+"                    /_/          /____/                 ",
+"                                                        ",
+"                                                        ",
+"                                                        "
+];
+
 // The main entry point of the network which defines the behaviour of the libp2p application.
 #[derive(NetworkBehaviour)]
 pub struct ChatBehaviour {
@@ -35,10 +50,11 @@ pub struct ChatBehaviour {
     // Request-Response behaviour for exchanging files.
     pub request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
 
-    // Kademlia DHT for p2p ... TODO
+    // Kademlia DHT behaviour for peer discovery and storage.
     pub kademlia: kad::Behaviour<MemoryStore>,
 }
 
+// Builds a Swarm, which will contain the state of the network as a whole.
 pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), Box<dyn Error>> {
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -82,8 +98,10 @@ pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), B
     let topic = gossipsub::IdentTopic::new("Global Chat");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
 
-    // Asking for the users's nickname.
-    println!("Please enter a nickname:");
+    // Clears the terminal then asks for the users's nickname.
+    print!("{}[2J", 27 as char);
+    let message = "Welcome to SwapBytes! Please enter a nickname:".to_string();
+    println!("{}", message.bold().cyan());
     let mut stdin: io::Lines<io::BufReader<io::Stdin>> = io::BufReader::new(io::stdin()).lines();
 
     {
@@ -93,18 +111,37 @@ pub async fn swarm() -> Result<(Client, impl Stream<Item = Event>, EventLoop), B
         new_nickname = new_nickname.trim_start().trim_end().to_string();
         state.nickname = new_nickname.clone();
 
-        println!(
-            "Welcome to SwapBytes, {}! Please enter chat messages one line at a time or type \\help for a list of available commands.",
-            state.nickname
-        );
+        // Clear terminal and print the SwapBytes logo.
+        print!("{}[2J", 27 as char);
+        if let Ok((cols, _rows)) = terminal::size() {
+            let logo_width = SWAPBYTES_LOGO[0].len();
+            let padding_left = (cols as usize / 2).saturating_sub(logo_width / 2);
+    
+            for line in SWAPBYTES_LOGO.iter() {
+                // Print spaces for padding to center the logo horizontally
+                let spaces = " ".repeat(padding_left - 1);
+                println!("{}{}", spaces, line.cyan().bold());
+            }
+        } else {
+            // If we can't get the terminal size, just print the logo as is.
+            for line in SWAPBYTES_LOGO.iter() {
+                println!("{}", line.cyan().bold());
+            }
+        }
 
+        // Welcome the user.
+        let message = format!("Welcome to SwapBytes, {}! Please enter chat messages one line at a time or type \\help for a list of available commands.", state.nickname);
+        println!("{}", message.cyan().bold());
+
+        // Store user infromation locally.
         let peer_id = swarm.local_peer_id().clone();
         state.peer_id = peer_id.to_string();
         state.nicknames.insert(peer_id, new_nickname.clone());
 
         state.current_room = "Global Chat".to_string();
         state.rooms.insert("Global Chat".to_string(), vec![peer_id.to_string()]);
-                    
+        
+        // Serialize the rooms and insert them into the Kademlia DHT.
         let seralized_rooms = serde_cbor::to_vec(&KademliaRecords::Rooms(state.rooms.clone())).unwrap();
 
         let key = kad::RecordKey::new(&"available_rooms");

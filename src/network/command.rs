@@ -10,6 +10,9 @@ use std::error::Error;
 
 use super::event_loop::FileResponse;
 
+/**
+ * 
+ */
 #[derive(Debug)]
 pub enum Command {
     StartProviding {

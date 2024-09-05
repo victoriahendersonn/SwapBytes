@@ -1,3 +1,4 @@
+use crossterm::terminal::{self, ClearType};
 use futures::{FutureExt, SinkExt, StreamExt};
 
 use serde::{Deserialize, Serialize};
@@ -7,10 +8,10 @@ use SwapBytes::state::STATE;
 use network::behaviour;
 use network::command::Command;
 use network::event_loop::Event;
-use std::{error::Error, io::Write};
+use std::error::Error;
 
 use tokio::{
-    io::{self, AsyncBufReadExt},
+    io::{self, AsyncBufReadExt, AsyncWriteExt, BufWriter},
     select, spawn,
 };
 
@@ -44,7 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 let mut command = Command::Unknown;
 
-                if line.starts_with("/") {
+                if line.trim_start().starts_with("/") {
                     let user_input: Vec<&str> = line.split_whitespace().collect();
 
                     if user_input[0] == "/start-providing" {
@@ -52,15 +53,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             println!("Usage: /start-providing <file_path> <file_name>");
                         } else {
                             client.start_providing(user_input[2].to_string()).await;
-
+                            
                             loop {
                                 match event_receiver.next().await {
                                     // Reply with the content of the file on incoming requests.
                                     Some(Event::InboundRequest { request, channel }) => {
                                         if request == user_input[2].to_string() {
-                                            client
-                                                .respond_file(std::fs::read(&user_input[1].to_string())?, channel)
-                                                .await;
+                                            client.respond_file(std::fs::read(&user_input[1].to_string())?, channel).await;
+                                            //break;
                                         }
                                     }
                                     e => todo!("{:?}", e),
@@ -92,23 +92,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 .0;
 
                             println!("File contents: ");
-                            std::io::stdout().write_all(&file_content)?;
+                            println!("{}", std::str::from_utf8(&file_content)?);
                         }
                     } else if user_input[0] == "/request-file" {
-                        // usage /request-file <file-name> <nickname>
                         // TODO
-                        let mut state = STATE.lock().unwrap();
-                        let peer_id = state.nicknames.get(libp2p::PeerId(user_input[1].to_string()));
-                        let connected_peer = libp2p::PeerId(state.connected_peer);
-                        if let Some(peer) = peer_id {
-                            self.swarm.dial(peer).unwrap();
-                        }
-                        
-                        let mut other_peer_id: Option<PeerId> = None;
-
-                        if let Some(peer_id) = other_peer_id {
-                            swarm.behaviour_mut().request_response.send_request(&peer_id, FileRequest(line.to_string()));
-                        }
                     } else {
                         // it'll be a command, so need to create the command accodingly
                         command = create_command(&line).await;
@@ -123,47 +110,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     command = Command::Message {
                         room: state.current_room.clone(),
                         message: message.clone(),
-                    }
+                    };
+
+                    // Removes the user's standard output from the terminal screen.
+                    print!("\x1b[F\x1b[K");
+                    // TODO
                 }
 
-                client.sender.send(command).await?;
+                match command {
+                    Command::CreateRoom { ref name } => {
+                        // Send the CreateRoom command
+                        client.sender.send(Command::CreateRoom { name: name.clone() }).await?;
+
+                        // Create the Notification command using the room name and send it everywhere.
+                        let mut rooms;
+                        
+                        {
+                            let state = STATE.lock().unwrap();
+                            rooms = state.rooms.clone();
+                        }
+
+                        for (room, _messages) in rooms {
+                            let message = format!("[All] SwapBytes: Room '{}' has been created, come join when you'd like to!", name);
+                            client.sender.send(Command::Message { room, message }).await?;
+                        }
+
+                        // Continue to the next loop iteration
+                        continue;
+                    }
+                    _ => client.sender.send(command).await?,
+                }
             }
         }
     }
-
-    // color_eyre::install()?;
-    // let mut terminal: ratatui::Terminal<ratatui::prelude::CrosstermBackend<std::io::Stdout>> = ratatui::init();
-    // let mut app_result = App::new();
-
-    // loop {
-    //     terminal.draw(|frame| app_result.draw(frame))?;
-
-    //     if let Event::Key(key) = event::read()? {
-    //         match app_result.input_mode {
-    //             InputMode::Normal => match key.code {
-    //                 KeyCode::Char('e') => {
-    //                     app_result.input_mode = InputMode::Editing;
-    //                 }
-    //                 KeyCode::Char('q') => {
-    //                     return Ok(());
-    //                 }
-    //                 _ => {}
-    //             },
-    //             InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
-    //                 KeyCode::Enter => app_result.submit_message(),
-    //                 KeyCode::Char(to_insert) => app_result.enter_char(to_insert),
-    //                 KeyCode::Backspace => app_result.delete_char(),
-    //                 KeyCode::Left => app_result.move_cursor_left(),
-    //                 KeyCode::Right => app_result.move_cursor_right(),
-    //                 KeyCode::Esc => app_result.input_mode = InputMode::Normal,
-    //                 _ => {}
-    //             },
-    //             InputMode::Editing => {}
-    //         }
-    //     }
-    // }
-
-    // ratatui::restore();
 }
 
 /**
