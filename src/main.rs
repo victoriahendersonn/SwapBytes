@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     Some(Event::InboundRequest { request, channel }) => {
                                         if request == user_input[2].to_string() {
                                             client.respond_file(std::fs::read(&user_input[1].to_string())?, channel).await;
-                                            //break;
+                                            break;
                                         }
                                     }
                                     e => todo!("{:?}", e),
